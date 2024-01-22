@@ -58,7 +58,8 @@ module Scan
 
     def execute(retries: 0)
       # Set retries to 0 if Xcode 13 because TestCommandGenerator will set '-retry-tests-on-failure -test-iterations'
-      if Helper.xcode_at_least?(13)
+      # unless 'postprocess_retry' option is set to 'true', then the error output based retry logic will kick in.
+      if Helper.xcode_at_least?(13) && !Scan.config[:postprocess_retry]
         retries = 0
         Scan.cache[:retry_attempt] = 0
       else
@@ -122,25 +123,26 @@ module Scan
     def retryable_tests(input)
       input = Helper.strip_ansi_colors(input)
 
-      retryable_tests = []
-
+      # Sometimes xcodebuild could put the tests that failed due to external factors, e.g app crashes, testing process terminations, etc.,
+      # especially at the end of the execution queue to the specific "early exit" section in the execution summary titled: "Testing failed:"
+      # as opposed to the "Failing tests:" where the rest of the failing tests are listed.
+      #
+      # When that happens, the xcodebuild error output doesn't contain any information about the test class in which the error had happened
+      # Implementing xcresult parsing shall account for these cases as well.
+      # For now, these tests will be skipped and CI will retry only the tests it can find inside the "Failing tests:" section
+      # This is teh original Fastlane behaviour before the Xcode 13 retry was introduced.
       failing_tests = input.split("Failing tests:\n").fetch(1, [])
                            .split("\n\n").first
+      # Hardcoding the suite name is a dirty fix to get the SC app UI tests retrying when the test runner process termination happens
+      # The proper fix with parsing the contents of xcresult will follow before submitting this for a review by the Fastlane team
+      test_suite = "iAuditorUITests"
+      tests_cases = failing_tests.split(/(?=\n\s+[\w\s]+:\n)/).first
+      .split("\n").each
+      .select { |line| line.match?(/^\s+/) }
+      .map { |line| line.strip.gsub(/[\s\.]/, "/").gsub(/[\-\[\]\(\)]/, "") }
+      .map { |line| test_suite + "/" + line }
 
-      suites = failing_tests.split(/(?=\n\s+[\w\s]+:\n)/)
-
-      suites.each do |suite|
-        suite_name = suite.match(/\s*([\w\s\S]+):/).captures.first
-
-        test_cases = suite.split(":\n").fetch(1, []).split("\n").each
-                          .select { |line| line.match?(/^\s+/) }
-                          .map { |line| line.strip.gsub(/[\s\.]/, "/").gsub(/[\-\[\]\(\)]/, "") }
-                          .map { |line| suite_name + "/" + line }
-
-        retryable_tests += test_cases
-      end
-
-      return retryable_tests.uniq
+      return tests_cases.uniq
     end
 
     def find_filename(type)
